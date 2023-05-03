@@ -106,6 +106,10 @@ ConfVersion=@MANGOS_REALM_VER@
 #        Default: 0 (Ban IP)
 #                 1 (Ban Account)
 #
+#    Auto Registration setting
+#        Default: 0 (not to use)
+#                 1 (Use)
+#
 ################################################################################
 LoginDatabaseInfo      = "127.0.0.1;3306;root;mangos;realmd"
 LogsDir                = ""
@@ -130,3 +134,5 @@ RealmsStateUpdateDelay = 20
 WrongPass.MaxCount     = 3
 WrongPass.BanTime      = 300
 WrongPass.BanType      = 0
+
+UseAutoReg             = 0

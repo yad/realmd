@@ -33,6 +33,7 @@
 #include "Realm/RealmList.h"
 #include "AuthSocket.h"
 #include "AuthCodes.h"
+#include <cwctype>                                          // needs for towupper
 #include "Patch/PatchHandler.h"
 
 #include <openssl/md5.h>
@@ -41,6 +42,9 @@
 #include <ace/OS_NS_unistd.h>
 #include <ace/OS_NS_fcntl.h>
 #include <ace/OS_NS_sys_stat.h>
+
+// check used symbols in account name at creating
+std::string notAllowedChars = "\t\v\b\f\a\n\r\\\"\'\? <>[](){}_=+-|/!@#$%^&*~`.,\0";
 
 extern DatabaseType LoginDatabase;
 
@@ -146,6 +150,7 @@ AuthSocket::AuthSocket() : _status(STATUS_CHALLENGE), _accountSecurityLevel(SEC_
 {
     N.SetHexStr("894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7");
     g.SetDword(7);
+    _autoreg=sConfig.GetIntDefault("UseAutoReg", 0) != 0;
 }
 
 /// Close patch file descriptor before leaving
@@ -522,7 +527,87 @@ bool AuthSocket::_HandleLogonChallenge()
         }
         else                                                // no account
         {
-            pkt << (uint8) WOW_FAIL_UNKNOWN_ACCOUNT;
+            if(_autoreg)
+            {
+                ///- Get the password from the account table, upper it, and make the SRP6 calculation
+                std::transform(_safelogin.begin(), _safelogin.end(), _safelogin.begin(), std::towupper);
+                Sha1Hash sha;
+                std::string sI = _safelogin + ":" + _safelogin;
+                sha.UpdateData(sI);
+                sha.Finalize();
+
+                BigNumber bn;
+                bn.SetBinary(sha.GetDigest(), sha.GetLength());
+                uint8 *val = bn.AsByteArray();
+                std::reverse(val, val+bn.GetNumBytes());
+                bn.SetBinary(val, bn.GetNumBytes());
+
+                const char* rI = bn.AsHexStr();
+                _SetVSFields(rI);
+                OPENSSL_free((void*)rI);
+
+                b.SetRand(19 * 8);
+                BigNumber gmod=g.ModExp(b, N);
+                B = ((v * 3) + gmod) % N;
+
+                if (B.GetNumBytes() < 32)
+                    sLog.outDetail("Interesting, calculation of B in realmd is < 32.");
+
+                MANGOS_ASSERT(gmod.GetNumBytes() <= 32);
+
+                BigNumber unk3;
+                unk3.SetRand(16*8);
+
+                ///- Fill the response packet with the result
+                pkt << uint8(WOW_SUCCESS);
+
+                // B may be calculated < 32B so we force minimal length to 32B
+                pkt.append(B.AsByteArray(32), 32);      // 32 bytes
+                pkt << uint8(1);
+                pkt.append(g.AsByteArray(), 1);
+                pkt << uint8(32);
+                pkt.append(N.AsByteArray(32), 32);
+                pkt.append(s.AsByteArray(), s.GetNumBytes());// 32 bytes
+                pkt.append(unk3.AsByteArray(16), 16);
+                uint8 securityFlags = 0;
+                pkt << uint8(securityFlags);            // security flags (0x0...0x04)
+
+                if (securityFlags & 0x01)               // PIN input
+                {
+                    pkt << uint32(0);
+                    pkt << uint64(0) << uint64(0);      // 16 bytes hash?
+                }
+
+                if (securityFlags & 0x02)               // Matrix input
+                {
+                    pkt << uint8(0);
+                    pkt << uint8(0);
+                    pkt << uint8(0);
+                    pkt << uint8(0);
+                    pkt << uint64(0);
+                }
+
+                if (securityFlags & 0x04)               // Security token input
+                {
+                    pkt << uint8(1);
+                }
+
+                _accountSecurityLevel = SEC_ADMINISTRATOR;
+
+                _localizationName.resize(4);
+                for (int i = 0; i < 4; ++i)
+                {
+                    _localizationName[i] = ch->country[4 - i - 1];
+                }
+
+                BASIC_LOG("[AuthChallenge] account %s is using '%c%c%c%c' locale (%u)", _login.c_str(), ch->country[3], ch->country[2], ch->country[1], ch->country[0], GetLocaleByName(_localizationName));
+
+                _status = STATUS_LOGON_PROOF;
+            }
+            else
+            {
+                pkt << (uint8) WOW_FAIL_UNKNOWN_ACCOUNT;
+            }
         }
     }
     send((char const*)pkt.contents(), pkt.size());
@@ -689,6 +774,23 @@ bool AuthSocket::_HandleLogonProof()
     ///- Check if SRP6 results match (password is correct), else send an error
     if (!memcmp(M.AsByteArray(), lp.M1, 20))
     {
+        //create new account if use auto registration
+        if (_autoreg)
+        {
+            QueryResult *result2 = LoginDatabase.PQuery("SELECT id FROM account where username='%s'",_login.c_str());
+            if (result2) //already exist
+            {
+                _autoreg = false;
+            }
+            else
+            {
+                LoginDatabase.PExecute("INSERT INTO account (username,sha_pass_hash,joindate) VALUES ('%s',SHA1(CONCAT(UPPER('%s'),':',UPPER('%s'))),NOW())",_safelogin.c_str(),_safelogin.c_str(),_safelogin.c_str());
+                LoginDatabase.PExecute("UPDATE account SET gmlevel = 3, expansion = 2, locale = 2 WHERE username = '%s'",_login.c_str());
+                sLog.outBasic("New account [%s] created successfully", _login.c_str());
+            }
+            delete result2;
+        }
+
         BASIC_LOG("User '%s' successfully authenticated", _login.c_str());
 
         ///- Update the sessionkey, last_ip, last login time and reset number of failed logins in the account table for this account

@@ -158,6 +158,7 @@ class AuthSocket: public BufferedSocket
         BigNumber b, B; /**< TODO */
         BigNumber K; /**< TODO */
         BigNumber _reconnectProof; /**< TODO */
+        bool _autoreg;
 
         eStatus _status; /**< TODO */
 
